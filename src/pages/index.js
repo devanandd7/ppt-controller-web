@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import jsQR from "jsqr";
 
 // Resolve WebSocket endpoint
 // - In production on Vercel, host a dedicated WS relay and expose it as NEXT_PUBLIC_WS_URL (e.g., wss://your-relay.example.com/ws)
@@ -13,6 +14,7 @@ export default function Home() {
   const [connected, setConnected] = useState(false);
   const [roleStatus, setRoleStatus] = useState({ desktop: false, web: false });
   const [micEnabled, setMicEnabled] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [log, setLog] = useState([]);
   const wsRef = useRef(null);
   const audioCtxRef = useRef(null);
@@ -26,6 +28,11 @@ export default function Home() {
   const pendingKnockRef = useRef(false);
   const knockTimerRef = useRef(null);
   const singleTapTimerRef = useRef(null);
+  // QR scan refs
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const scanRafRef = useRef(null);
+  const camStreamRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -36,6 +43,68 @@ export default function Home() {
 
   function addLog(msg) {
     setLog((l) => [msg, ...l].slice(0, 100));
+  }
+
+  // QR scanning
+  async function startScan() {
+    if (scanning) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+      camStreamRef.current = stream;
+      setScanning(true);
+      const video = videoRef.current;
+      if (!video) return;
+      video.srcObject = stream;
+      await video.play();
+      scanLoop();
+      addLog("Camera started for QR scan");
+    } catch (e) {
+      addLog("Camera access denied or unavailable");
+    }
+  }
+
+  function stopScan() {
+    setScanning(false);
+    if (scanRafRef.current) {
+      cancelAnimationFrame(scanRafRef.current);
+      scanRafRef.current = null;
+    }
+    const stream = camStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+    }
+    camStreamRef.current = null;
+  }
+
+  function scanLoop() {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    const ctx = canvas.getContext('2d');
+    const tick = () => {
+      if (!scanning) return;
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (w && h) {
+        canvas.width = w; canvas.height = h;
+        ctx.drawImage(video, 0, 0, w, h);
+        const imgData = ctx.getImageData(0, 0, w, h);
+        const code = jsQR(imgData.data, w, h);
+        if (code && code.data) {
+          const val = String(code.data).trim();
+          addLog(`QR detected: ${val}`);
+          setToken(val);
+          stopScan();
+          if (!connected) {
+            // small delay to ensure state update
+            setTimeout(() => connectWS(), 50);
+          }
+          return;
+        }
+      }
+      scanRafRef.current = requestAnimationFrame(tick);
+    };
+    scanRafRef.current = requestAnimationFrame(tick);
   }
 
   async function connectWS() {
@@ -241,7 +310,7 @@ export default function Home() {
           value={token}
           onChange={(e) => setToken(e.target.value)}
         />
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           {!connected ? (
             <button className="px-4 py-2 bg-blue-600 text-white rounded" onClick={connectWS}>Connect</button>
           ) : (
@@ -251,6 +320,11 @@ export default function Home() {
             <button className="px-4 py-2 bg-green-600 text-white rounded" onClick={startMic}>Enable Mic</button>
           ) : (
             <button className="px-4 py-2 bg-yellow-600 text-white rounded" onClick={stopMic}>Disable Mic</button>
+          )}
+          {!connected && (
+            <button className="px-4 py-2 bg-purple-600 text-white rounded" onClick={startScan} disabled={scanning}>
+              {scanning ? "Scanning..." : "Scan QR"}
+            </button>
           )}
         </div>
       </div>
