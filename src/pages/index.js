@@ -18,6 +18,7 @@ export default function Home() {
   const [decoding, setDecoding] = useState(false);
   const [scanMsg, setScanMsg] = useState("");
   const [cameraReady, setCameraReady] = useState(false);
+  const [preferRear, setPreferRear] = useState(true);
   const [log, setLog] = useState([]);
   const wsRef = useRef(null);
   const audioCtxRef = useRef(null);
@@ -56,40 +57,57 @@ export default function Home() {
   async function startScan() {
     if (scanning) return;
     try {
-      // Reset any previous camera stream before starting a new one
       stopScan();
-      const constraints = {
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      camStreamRef.current = stream;
       setScanning(true);
       setScanMsg("Starting camera…");
       setCameraReady(false);
+
+      const stream = await openCameraWithFallback(preferRear);
+      if (!stream) {
+        setScanMsg("Cannot open camera. Check permissions.");
+        return;
+      }
+      camStreamRef.current = stream;
       const video = videoRef.current;
       if (!video) return;
       video.srcObject = stream;
       video.setAttribute('playsinline', 'true');
       video.setAttribute('autoplay', 'true');
-      video.muted = true; // iOS requires muted for autoplay
-      // Play and wait for dimensions to be available
+      video.muted = true;
+
+      const handleReady = async () => {
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          setCameraReady(true);
+          setScanMsg("Point at the QR and press Capture");
+        }
+      };
       try { await video.play(); } catch (_) {}
+      video.onloadedmetadata = handleReady;
+      // Also poll for dimensions in case onloadedmetadata is late
       await waitForVideoReady(video, 5000);
-      if (video.videoWidth > 0 && video.videoHeight > 0) {
-        setCameraReady(true);
-        setScanMsg("Point at the QR and press Capture");
-      } else {
-        setScanMsg("Camera not ready yet. Try again.");
-      }
+      await handleReady();
       addLog("Camera started for QR scan");
     } catch (e) {
+      setScanMsg("Camera access denied or unavailable");
       addLog("Camera access denied or unavailable");
     }
+  }
+
+  // Try multiple constraint sets for better compatibility
+  async function openCameraWithFallback(rearPreferred) {
+    const trials = [
+      { video: { facingMode: { ideal: rearPreferred ? 'environment' : 'user' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+      { video: { facingMode: { ideal: rearPreferred ? 'environment' : 'user' } }, audio: false },
+      { video: true, audio: false },
+    ];
+    for (const c of trials) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(c);
+      } catch (err) {
+        // Continue to next trial
+      }
+    }
+    return null;
   }
 
   function stopScan() {
@@ -478,15 +496,21 @@ export default function Home() {
               {/* Scanning frame */}
               <div className="absolute inset-6 border-2 border-green-500 rounded pointer-events-none"></div>
             </div>
-            <div className="flex items-center gap-2 mt-3">
+            <div className="flex items-center gap-2 mt-3 flex-wrap">
               <button
                 className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-60"
                 onClick={captureAndDecode}
                 disabled={decoding || !cameraReady}
               >
-                {decoding ? 'Decoding…' : (cameraReady ? 'Capture' : 'Preparing…')}
+                {decoding ? 'Decoding…' : (cameraReady ? 'Take Snap & Scan' : 'Preparing…')}
               </button>
               <button className="px-3 py-2 border rounded" onClick={() => { stopScan(); startScan(); }}>Restart Camera</button>
+              <button
+                className="px-3 py-2 border rounded"
+                onClick={async () => { setPreferRear(p => !p); stopScan(); setScanMsg("Switching camera…"); await startScan(); }}
+              >
+                Switch to {preferRear ? 'Front' : 'Rear'}
+              </button>
             </div>
             <div className="text-xs opacity-70 mt-2 min-h-4">{scanMsg}</div>
             <canvas ref={canvasRef} className="hidden" />
