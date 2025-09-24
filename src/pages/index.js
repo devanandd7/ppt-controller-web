@@ -99,26 +99,20 @@ export default function Home() {
     }
   }
 
-  // Gesture helpers
-  function onTouchStart(e) {
-    const t = e.touches ? e.touches[0] : e;
-    touchStartRef.current = { x: t.clientX, y: t.clientY, t: performance.now(), isDown: true };
+  // Gesture helpers (Pointer Events to avoid duplicate touch+mouse firing)
+  function onPointerDown(e) {
+    // Only consider primary button/pointer
+    if (e.isPrimary === false) return;
+    touchStartRef.current = { x: e.clientX, y: e.clientY, t: performance.now(), isDown: true };
   }
 
-  function onTouchEnd(e) {
+  function onPointerUp(e) {
+    if (e.isPrimary === false) return;
     const start = touchStartRef.current;
     touchStartRef.current.isDown = false;
     const now = performance.now();
-
-    let endX, endY;
-    if (e.changedTouches && e.changedTouches[0]) {
-      endX = e.changedTouches[0].clientX;
-      endY = e.changedTouches[0].clientY;
-    } else if (e.clientX != null) {
-      endX = e.clientX; endY = e.clientY;
-    } else {
-      return;
-    }
+    const endX = e.clientX;
+    const endY = e.clientY;
 
     const dx = endX - start.x;
     const dy = endY - start.y;
@@ -129,13 +123,8 @@ export default function Home() {
     const SWIPE_DIST = 60;
     const SWIPE_RATIO = 2; // horizontal dominance
     if (absDx > SWIPE_DIST && absDx > SWIPE_RATIO * absDy) {
-      // Right swipe => Next, Left swipe => Previous
       if (dx > 0) sendSignal("signal-1"); else sendSignal("signal-2");
-      // Cancel tap detection timer if any
-      if (singleTapTimerRef.current) {
-        clearTimeout(singleTapTimerRef.current);
-        singleTapTimerRef.current = null;
-      }
+      if (singleTapTimerRef.current) { clearTimeout(singleTapTimerRef.current); singleTapTimerRef.current = null; }
       lastTapTimeRef.current = 0;
       return;
     }
@@ -143,16 +132,11 @@ export default function Home() {
     // Tap / Double-tap
     const TAP_WINDOW = 300; // ms
     if (now - lastTapTimeRef.current < TAP_WINDOW) {
-      // Double tap => Previous
-      if (singleTapTimerRef.current) {
-        clearTimeout(singleTapTimerRef.current);
-        singleTapTimerRef.current = null;
-      }
+      if (singleTapTimerRef.current) { clearTimeout(singleTapTimerRef.current); singleTapTimerRef.current = null; }
       lastTapTimeRef.current = 0;
       sendSignal("signal-2");
     } else {
       lastTapTimeRef.current = now;
-      // Single tap delayed until we know it's not a double tap
       singleTapTimerRef.current = setTimeout(() => {
         sendSignal("signal-1");
         singleTapTimerRef.current = null;
@@ -282,10 +266,9 @@ export default function Home() {
       {connected && (
         <div
           className="w-full max-w-3xl flex-1 min-h-[300px] border-2 border-dashed rounded-xl bg-gray-100 dark:bg-gray-800 flex items-center justify-center select-none"
-          onTouchStart={onTouchStart}
-          onTouchEnd={onTouchEnd}
-          onMouseDown={onTouchStart}
-          onMouseUp={onTouchEnd}
+          style={{ touchAction: 'none' }}
+          onPointerDown={onPointerDown}
+          onPointerUp={onPointerUp}
         >
           <div className="text-center text-sm opacity-70">
             <div>single tap / right swipe = Next</div>
