@@ -1,0 +1,8 @@
+# Environment variables for web (Next.js)
+# Copy to your Vercel Project Settings → Environment Variables
+
+# Public WebSocket relay URL (Render or your own WS host)
+# Example:
+# NEXT_PUBLIC_WS_URL=wss://ppt-relay.onrender.com
+
+NEXT_PUBLIC_WS_URL=https://socket-server-code-for-render-part-of.onrender.com

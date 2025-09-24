@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 
-// Use same-origin WS endpoint that the Next.js API route hosts
-const WS_HOST = typeof window !== "undefined"
-  ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/api/ws`
+// Resolve WebSocket endpoint
+// - In production on Vercel, host a dedicated WS relay and expose it as NEXT_PUBLIC_WS_URL (e.g., wss://your-relay.example.com/ws)
+// - In local dev, fall back to same-origin Next.js API route /api/ws
+const WS_ENDPOINT = typeof window !== "undefined"
+  ? (process.env.NEXT_PUBLIC_WS_URL
+      || `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/api/ws`)
   : "";
 
 export default function Home() {
@@ -37,9 +40,11 @@ export default function Home() {
       return;
     }
     try {
-      // Ensure the API route initializes its WebSocket server before upgrade
-      await fetch("/api/ws");
-      const url = `${WS_HOST}/?token=${encodeURIComponent(token)}&role=web`;
+      // If we're using the same-origin API route, ping it first so its WS server initializes
+      if (!process.env.NEXT_PUBLIC_WS_URL) {
+        try { await fetch("/api/ws"); } catch {}
+      }
+      const url = `${WS_ENDPOINT}${WS_ENDPOINT.includes('?') ? '&' : '/?'}token=${encodeURIComponent(token)}&role=web`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
       ws.onopen = () => {
