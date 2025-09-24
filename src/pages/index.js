@@ -60,14 +60,32 @@ export default function Home() {
   async function startScan() {
     if (scanning) return;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+      const constraints = {
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       camStreamRef.current = stream;
       setScanning(true);
       const video = videoRef.current;
       if (!video) return;
       video.srcObject = stream;
-      await video.play();
-      scanLoop();
+      video.setAttribute('playsinline', 'true');
+      video.setAttribute('autoplay', 'true');
+      video.muted = true; // iOS requires muted for autoplay
+      const playVideo = async () => {
+        try { await video.play(); } catch (_) {}
+        scanLoop();
+      };
+      if (video.readyState >= 2) {
+        await playVideo();
+      } else {
+        video.onloadedmetadata = playVideo;
+      }
       addLog("Camera started for QR scan");
     } catch (e) {
       addLog("Camera access denied or unavailable");
@@ -94,8 +112,8 @@ export default function Home() {
     const ctx = canvas.getContext('2d');
     const tick = () => {
       if (!scanning) return;
-      const w = video.videoWidth;
-      const h = video.videoHeight;
+      const w = video.videoWidth || 0;
+      const h = video.videoHeight || 0;
       if (w && h) {
         canvas.width = w; canvas.height = h;
         ctx.drawImage(video, 0, 0, w, h);
@@ -357,6 +375,28 @@ export default function Home() {
             <div>single tap / right swipe = Next</div>
             <div>double tap / left swipe = Previous</div>
           </div>
+        </div>
+      )}
+
+      {/* Floating mini manual buttons (icons) when connected */}
+      {connected && (
+        <div className="fixed bottom-4 right-4 z-40 flex gap-2">
+          <button
+            title="Previous"
+            aria-label="Previous"
+            className="w-10 h-10 rounded-full bg-gray-800 text-white flex items-center justify-center shadow hover:bg-gray-700 active:scale-95"
+            onClick={() => sendSignal('signal-2')}
+          >
+            ◀
+          </button>
+          <button
+            title="Next"
+            aria-label="Next"
+            className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center shadow hover:bg-blue-500 active:scale-95"
+            onClick={() => sendSignal('signal-1')}
+          >
+            ▶
+          </button>
         </div>
       )}
 
