@@ -15,6 +15,9 @@ export default function Home() {
   const [roleStatus, setRoleStatus] = useState({ desktop: false, web: false });
   const [micEnabled, setMicEnabled] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [decoding, setDecoding] = useState(false);
+  const [scanMsg, setScanMsg] = useState("");
+  const [cameraReady, setCameraReady] = useState(false);
   const [log, setLog] = useState([]);
   const wsRef = useRef(null);
   const audioCtxRef = useRef(null);
@@ -46,20 +49,15 @@ export default function Home() {
     setLog((l) => [msg, ...l].slice(0, 100));
   }
 
-  // Auto-start QR scan on mobile to help users see the camera preview immediately
-  useEffect(() => {
-    if (typeof navigator !== 'undefined') {
-      const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
-      if (isMobile && !connected && !token && !scanning) {
-        startScan();
-      }
-    }
-  }, [connected, token, scanning]);
+  // NOTE: Do not auto-start camera; require user gesture via 'Scan QR' button
+  // Auto-start can cause autoplay/permission issues on mobile browsers.
 
   // QR scanning
   async function startScan() {
     if (scanning) return;
     try {
+      // Reset any previous camera stream before starting a new one
+      stopScan();
       const constraints = {
         video: {
           facingMode: { ideal: "environment" },
@@ -71,20 +69,22 @@ export default function Home() {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       camStreamRef.current = stream;
       setScanning(true);
+      setScanMsg("Starting camera…");
+      setCameraReady(false);
       const video = videoRef.current;
       if (!video) return;
       video.srcObject = stream;
       video.setAttribute('playsinline', 'true');
       video.setAttribute('autoplay', 'true');
       video.muted = true; // iOS requires muted for autoplay
-      const playVideo = async () => {
-        try { await video.play(); } catch (_) {}
-        scanLoop();
-      };
-      if (video.readyState >= 2) {
-        await playVideo();
+      // Play and wait for dimensions to be available
+      try { await video.play(); } catch (_) {}
+      await waitForVideoReady(video, 5000);
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        setCameraReady(true);
+        setScanMsg("Point at the QR and press Capture");
       } else {
-        video.onloadedmetadata = playVideo;
+        setScanMsg("Camera not ready yet. Try again.");
       }
       addLog("Camera started for QR scan");
     } catch (e) {
@@ -134,6 +134,65 @@ export default function Home() {
       scanRafRef.current = requestAnimationFrame(tick);
     };
     scanRafRef.current = requestAnimationFrame(tick);
+  }
+
+  // Capture a still frame and decode once
+  async function captureAndDecode() {
+    if (!scanning || decoding) return;
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas) return;
+      const ctx = canvas.getContext('2d');
+
+      // Try ImageCapture first (more reliable on some devices)
+      let imgData = null;
+      try {
+        const stream = camStreamRef.current;
+        const track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+        if (track && typeof window !== 'undefined' && window.ImageCapture) {
+          const ic = new window.ImageCapture(track);
+          const bmp = await ic.grabFrame();
+          canvas.width = bmp.width; canvas.height = bmp.height;
+          ctx.drawImage(bmp, 0, 0);
+          imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        }
+      } catch (_) {
+        // ignore and fall back
+      }
+
+      // Fallback: draw from <video>
+      if (!imgData) {
+        if (!cameraReady || !(video.videoWidth && video.videoHeight)) {
+          setScanMsg("Preparing camera…");
+          await waitForVideoReady(video, 3000);
+        }
+        const w = video.videoWidth || video.clientWidth || 640;
+        const h = video.videoHeight || video.clientHeight || 480;
+        if (!w || !h) { setScanMsg("Camera not ready yet. Try again."); return; }
+        canvas.width = w; canvas.height = h;
+        ctx.drawImage(video, 0, 0, w, h);
+        imgData = ctx.getImageData(0, 0, w, h);
+      }
+
+      setDecoding(true);
+      const code = jsQR(imgData.data, canvas.width, canvas.height);
+      setDecoding(false);
+      if (code && code.data) {
+        const val = String(code.data).trim();
+        addLog(`QR detected: ${val}`);
+        setToken(val);
+        stopScan();
+        if (!connected) {
+          setTimeout(() => connectWS(), 50);
+        }
+      } else {
+        setScanMsg("No QR found. Adjust and press Capture again.");
+      }
+    } catch (e) {
+      setDecoding(false);
+      setScanMsg("Failed to decode. Try again.");
+    }
   }
 
   async function connectWS() {
@@ -417,11 +476,20 @@ export default function Home() {
                 autoPlay
               ></video>
               {/* Scanning frame */}
-              <div className="absolute inset-6 border-2 border-green-500 rounded"></div>
+              <div className="absolute inset-6 border-2 border-green-500 rounded pointer-events-none"></div>
             </div>
-            <div className="text-xs opacity-70 mt-2">
-              Allow camera access. On mobile, rear camera is requested (environment). Point at the QR code from the desktop app.
+            <div className="flex items-center gap-2 mt-3">
+              <button
+                className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-60"
+                onClick={captureAndDecode}
+                disabled={decoding || !cameraReady}
+              >
+                {decoding ? 'Decoding…' : (cameraReady ? 'Capture' : 'Preparing…')}
+              </button>
+              <button className="px-3 py-2 border rounded" onClick={() => { stopScan(); startScan(); }}>Restart Camera</button>
             </div>
+            <div className="text-xs opacity-70 mt-2 min-h-4">{scanMsg}</div>
+            <canvas ref={canvasRef} className="hidden" />
           </div>
         </div>
       )}
