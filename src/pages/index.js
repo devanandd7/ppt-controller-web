@@ -17,11 +17,15 @@ export default function Home() {
   const wsRef = useRef(null);
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
+  // Touch/gesture refs
+  const lastTapTimeRef = useRef(0);
+  const touchStartRef = useRef({ x: 0, y: 0, t: 0, isDown: false });
   const micSourceRef = useRef(null);
   const rafRef = useRef(null);
   const lastKnockTimeRef = useRef(0);
   const pendingKnockRef = useRef(false);
   const knockTimerRef = useRef(null);
+  const singleTapTimerRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -92,6 +96,67 @@ export default function Home() {
       addLog(`Sent ${name}`);
     } else {
       addLog("Cannot send, not connected");
+    }
+  }
+
+  // Gesture helpers
+  function onTouchStart(e) {
+    const t = e.touches ? e.touches[0] : e;
+    touchStartRef.current = { x: t.clientX, y: t.clientY, t: performance.now(), isDown: true };
+  }
+
+  function onTouchEnd(e) {
+    const start = touchStartRef.current;
+    touchStartRef.current.isDown = false;
+    const now = performance.now();
+
+    let endX, endY;
+    if (e.changedTouches && e.changedTouches[0]) {
+      endX = e.changedTouches[0].clientX;
+      endY = e.changedTouches[0].clientY;
+    } else if (e.clientX != null) {
+      endX = e.clientX; endY = e.clientY;
+    } else {
+      return;
+    }
+
+    const dx = endX - start.x;
+    const dy = endY - start.y;
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+
+    // Detect horizontal swipe first
+    const SWIPE_DIST = 60;
+    const SWIPE_RATIO = 2; // horizontal dominance
+    if (absDx > SWIPE_DIST && absDx > SWIPE_RATIO * absDy) {
+      // Right swipe => Next, Left swipe => Previous
+      if (dx > 0) sendSignal("signal-1"); else sendSignal("signal-2");
+      // Cancel tap detection timer if any
+      if (singleTapTimerRef.current) {
+        clearTimeout(singleTapTimerRef.current);
+        singleTapTimerRef.current = null;
+      }
+      lastTapTimeRef.current = 0;
+      return;
+    }
+
+    // Tap / Double-tap
+    const TAP_WINDOW = 300; // ms
+    if (now - lastTapTimeRef.current < TAP_WINDOW) {
+      // Double tap => Previous
+      if (singleTapTimerRef.current) {
+        clearTimeout(singleTapTimerRef.current);
+        singleTapTimerRef.current = null;
+      }
+      lastTapTimeRef.current = 0;
+      sendSignal("signal-2");
+    } else {
+      lastTapTimeRef.current = now;
+      // Single tap delayed until we know it's not a double tap
+      singleTapTimerRef.current = setTimeout(() => {
+        sendSignal("signal-1");
+        singleTapTimerRef.current = null;
+      }, TAP_WINDOW);
     }
   }
 
@@ -182,6 +247,8 @@ export default function Home() {
   return (
     <div className="min-h-screen p-6 flex flex-col items-center gap-6">
       <h1 className="text-2xl font-semibold">Web Knock Controller</h1>
+
+      {/* Top controls */}
       <div className="w-full max-w-md space-y-3">
         <label className="block text-sm font-medium">Token</label>
         <input
@@ -204,28 +271,50 @@ export default function Home() {
         </div>
       </div>
 
+      {/* Status line */}
       <div className="w-full max-w-md space-y-2">
         <div className="text-sm">Status: {connected ? "Connected" : "Disconnected"}</div>
         <div className="text-sm">Desktop joined: {roleStatus.desktop ? "Yes" : "No"}</div>
         <div className="text-sm">Website joined: {roleStatus.web ? "Yes" : "No"}</div>
       </div>
 
-      <div className="w-full max-w-md space-y-2">
-        <div className="text-sm font-medium">Manual Test</div>
-        <div className="flex gap-2">
-          <button className="px-3 py-2 border rounded" onClick={() => sendSignal("signal-1")}>Send signal-1 (Next)</button>
-          <button className="px-3 py-2 border rounded" onClick={() => sendSignal("signal-2")}>Send signal-2 (Previous)</button>
+      {/* Touch pad shown only when connected */}
+      {connected && (
+        <div
+          className="w-full max-w-3xl flex-1 min-h-[300px] border-2 border-dashed rounded-xl bg-gray-100 dark:bg-gray-800 flex items-center justify-center select-none"
+          onTouchStart={onTouchStart}
+          onTouchEnd={onTouchEnd}
+          onMouseDown={onTouchStart}
+          onMouseUp={onTouchEnd}
+        >
+          <div className="text-center text-sm opacity-70">
+            <div>single tap / right swipe = Next</div>
+            <div>double tap / left swipe = Previous</div>
+          </div>
         </div>
-      </div>
+      )}
 
-      <div className="w-full max-w-md">
-        <div className="text-sm font-medium mb-2">Logs</div>
-        <div className="h-48 overflow-auto border rounded p-2 text-xs bg-gray-50">
-          {log.map((line, idx) => (
-            <div key={idx}>{line}</div>
-          ))}
-        </div>
-      </div>
+      {/* Manual + Logs only when not connected (to keep UI minimal when connected) */}
+      {!connected && (
+        <>
+          <div className="w-full max-w-md space-y-2">
+            <div className="text-sm font-medium">Manual Test</div>
+            <div className="flex gap-2">
+              <button className="px-3 py-2 border rounded" onClick={() => sendSignal("signal-1")}>Send signal-1 (Next)</button>
+              <button className="px-3 py-2 border rounded" onClick={() => sendSignal("signal-2")}>Send signal-2 (Previous)</button>
+            </div>
+          </div>
+
+          <div className="w-full max-w-md">
+            <div className="text-sm font-medium mb-2">Logs</div>
+            <div className="h-48 overflow-auto border rounded p-2 text-xs bg-gray-50">
+              {log.map((line, idx) => (
+                <div key={idx}>{line}</div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
