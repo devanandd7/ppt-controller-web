@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import jsQR from "jsqr";
 
 // Resolve WebSocket endpoint
 // - In production on Vercel, host a dedicated WS relay and expose it as NEXT_PUBLIC_WS_URL (e.g., wss://your-relay.example.com/ws)
@@ -14,11 +13,6 @@ export default function Home() {
   const [connected, setConnected] = useState(false);
   const [roleStatus, setRoleStatus] = useState({ desktop: false, web: false });
   const [micEnabled, setMicEnabled] = useState(false);
-  const [scanning, setScanning] = useState(false);
-  const [decoding, setDecoding] = useState(false);
-  const [scanMsg, setScanMsg] = useState("");
-  const [cameraReady, setCameraReady] = useState(false);
-  const [preferRear, setPreferRear] = useState(true);
   const [log, setLog] = useState([]);
   const wsRef = useRef(null);
   const audioCtxRef = useRef(null);
@@ -32,185 +26,16 @@ export default function Home() {
   const pendingKnockRef = useRef(false);
   const knockTimerRef = useRef(null);
   const singleTapTimerRef = useRef(null);
-  // QR scan refs
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const scanRafRef = useRef(null);
-  const camStreamRef = useRef(null);
 
   useEffect(() => {
     return () => {
       disconnectWS();
       stopMic();
-      stopScan();
     };
   }, []);
 
   function addLog(msg) {
     setLog((l) => [msg, ...l].slice(0, 100));
-  }
-
-  // NOTE: Do not auto-start camera; require user gesture via 'Scan QR' button
-  // Auto-start can cause autoplay/permission issues on mobile browsers.
-
-  // QR scanning
-  async function startScan() {
-    if (scanning) return;
-    try {
-      stopScan();
-      setScanning(true);
-      setScanMsg("Starting camera…");
-      setCameraReady(false);
-
-      const stream = await openCameraWithFallback(preferRear);
-      if (!stream) {
-        setScanMsg("Cannot open camera. Check permissions.");
-        return;
-      }
-      camStreamRef.current = stream;
-      const video = videoRef.current;
-      if (!video) return;
-      video.srcObject = stream;
-      video.setAttribute('playsinline', 'true');
-      video.setAttribute('autoplay', 'true');
-      video.muted = true;
-
-      const handleReady = async () => {
-        if (video.videoWidth > 0 && video.videoHeight > 0) {
-          setCameraReady(true);
-          setScanMsg("Point at the QR and press Capture");
-        }
-      };
-      try { await video.play(); } catch (_) {}
-      video.onloadedmetadata = handleReady;
-      // Also poll for dimensions in case onloadedmetadata is late
-      await waitForVideoReady(video, 5000);
-      await handleReady();
-      addLog("Camera started for QR scan");
-    } catch (e) {
-      setScanMsg("Camera access denied or unavailable");
-      addLog("Camera access denied or unavailable");
-    }
-  }
-
-  // Try multiple constraint sets for better compatibility
-  async function openCameraWithFallback(rearPreferred) {
-    const trials = [
-      { video: { facingMode: { ideal: rearPreferred ? 'environment' : 'user' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
-      { video: { facingMode: { ideal: rearPreferred ? 'environment' : 'user' } }, audio: false },
-      { video: true, audio: false },
-    ];
-    for (const c of trials) {
-      try {
-        return await navigator.mediaDevices.getUserMedia(c);
-      } catch (err) {
-        // Continue to next trial
-      }
-    }
-    return null;
-  }
-
-  function stopScan() {
-    setScanning(false);
-    if (scanRafRef.current) {
-      cancelAnimationFrame(scanRafRef.current);
-      scanRafRef.current = null;
-    }
-    const stream = camStreamRef.current;
-    if (stream) {
-      stream.getTracks().forEach(t => { try { t.stop(); } catch {} });
-    }
-    camStreamRef.current = null;
-  }
-
-  function scanLoop() {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return;
-    const ctx = canvas.getContext('2d');
-    const tick = () => {
-      if (!scanning) return;
-      const w = video.videoWidth || 0;
-      const h = video.videoHeight || 0;
-      if (w && h) {
-        canvas.width = w; canvas.height = h;
-        ctx.drawImage(video, 0, 0, w, h);
-        const imgData = ctx.getImageData(0, 0, w, h);
-        const code = jsQR(imgData.data, w, h);
-        if (code && code.data) {
-          const val = String(code.data).trim();
-          addLog(`QR detected: ${val}`);
-          setToken(val);
-          stopScan();
-          if (!connected) {
-            // small delay to ensure state update
-            setTimeout(() => connectWS(), 50);
-          }
-          return;
-        }
-      }
-      scanRafRef.current = requestAnimationFrame(tick);
-    };
-    scanRafRef.current = requestAnimationFrame(tick);
-  }
-
-  // Capture a still frame and decode once
-  async function captureAndDecode() {
-    if (!scanning || decoding) return;
-    try {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      if (!video || !canvas) return;
-      const ctx = canvas.getContext('2d');
-
-      // Try ImageCapture first (more reliable on some devices)
-      let imgData = null;
-      try {
-        const stream = camStreamRef.current;
-        const track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
-        if (track && typeof window !== 'undefined' && window.ImageCapture) {
-          const ic = new window.ImageCapture(track);
-          const bmp = await ic.grabFrame();
-          canvas.width = bmp.width; canvas.height = bmp.height;
-          ctx.drawImage(bmp, 0, 0);
-          imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        }
-      } catch (_) {
-        // ignore and fall back
-      }
-
-      // Fallback: draw from <video>
-      if (!imgData) {
-        if (!cameraReady || !(video.videoWidth && video.videoHeight)) {
-          setScanMsg("Preparing camera…");
-          await waitForVideoReady(video, 3000);
-        }
-        const w = video.videoWidth || video.clientWidth || 640;
-        const h = video.videoHeight || video.clientHeight || 480;
-        if (!w || !h) { setScanMsg("Camera not ready yet. Try again."); return; }
-        canvas.width = w; canvas.height = h;
-        ctx.drawImage(video, 0, 0, w, h);
-        imgData = ctx.getImageData(0, 0, w, h);
-      }
-
-      setDecoding(true);
-      const code = jsQR(imgData.data, canvas.width, canvas.height);
-      setDecoding(false);
-      if (code && code.data) {
-        const val = String(code.data).trim();
-        addLog(`QR detected: ${val}`);
-        setToken(val);
-        stopScan();
-        if (!connected) {
-          setTimeout(() => connectWS(), 50);
-        }
-      } else {
-        setScanMsg("No QR found. Adjust and press Capture again.");
-      }
-    } catch (e) {
-      setDecoding(false);
-      setScanMsg("Failed to decode. Try again.");
-    }
   }
 
   async function connectWS() {
@@ -416,7 +241,7 @@ export default function Home() {
           value={token}
           onChange={(e) => setToken(e.target.value)}
         />
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
           {!connected ? (
             <button className="px-4 py-2 bg-blue-600 text-white rounded" onClick={connectWS}>Connect</button>
           ) : (
@@ -427,9 +252,6 @@ export default function Home() {
           ) : (
             <button className="px-4 py-2 bg-yellow-600 text-white rounded" onClick={stopMic}>Disable Mic</button>
           )}
-          <button className="px-4 py-2 bg-purple-600 text-white rounded" onClick={startScan} disabled={scanning}>
-            {scanning ? "Scanning..." : "Scan QR"}
-          </button>
         </div>
       </div>
 
@@ -455,67 +277,26 @@ export default function Home() {
         </div>
       )}
 
-      {/* Floating mini manual buttons (icons) when connected */}
-      {connected && (
-        <div className="fixed bottom-4 right-4 z-40 flex gap-2">
-          <button
-            title="Previous"
-            aria-label="Previous"
-            className="w-10 h-10 rounded-full bg-gray-800 text-white flex items-center justify-center shadow hover:bg-gray-700 active:scale-95"
-            onClick={() => sendSignal('signal-2')}
-          >
-            ◀
-          </button>
-          <button
-            title="Next"
-            aria-label="Next"
-            className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center shadow hover:bg-blue-500 active:scale-95"
-            onClick={() => sendSignal('signal-1')}
-          >
-            ▶
-          </button>
-        </div>
-      )}
-
-      {/* QR scanning overlay (visible on both desktop/mobile). Shows live camera preview. */}
-      {scanning && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-900 p-3 rounded-lg w-[92vw] max-w-md">
-            <div className="flex justify-between items-center mb-2">
-              <div className="font-medium">Scan QR Code</div>
-              <button className="text-sm px-2 py-1 border rounded" onClick={stopScan}>Close</button>
+      {/* Manual + Logs only when not connected (to keep UI minimal when connected) */}
+      {!connected && (
+        <>
+          <div className="w-full max-w-md space-y-2">
+            <div className="text-sm font-medium">Manual Test</div>
+            <div className="flex gap-2">
+              <button className="px-3 py-2 border rounded" onClick={() => sendSignal("signal-1")}>Send signal-1 (Next)</button>
+              <button className="px-3 py-2 border rounded" onClick={() => sendSignal("signal-2")}>Send signal-2 (Previous)</button>
             </div>
-            <div className="relative w-full overflow-hidden rounded">
-              <video
-                ref={videoRef}
-                className="w-full block"
-                playsInline
-                muted
-                autoPlay
-              ></video>
-              {/* Scanning frame */}
-              <div className="absolute inset-6 border-2 border-green-500 rounded pointer-events-none"></div>
-            </div>
-            <div className="flex items-center gap-2 mt-3 flex-wrap">
-              <button
-                className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-60"
-                onClick={captureAndDecode}
-                disabled={decoding || !cameraReady}
-              >
-                {decoding ? 'Decoding…' : (cameraReady ? 'Take Snap & Scan' : 'Preparing…')}
-              </button>
-              <button className="px-3 py-2 border rounded" onClick={() => { stopScan(); startScan(); }}>Restart Camera</button>
-              <button
-                className="px-3 py-2 border rounded"
-                onClick={async () => { setPreferRear(p => !p); stopScan(); setScanMsg("Switching camera…"); await startScan(); }}
-              >
-                Switch to {preferRear ? 'Front' : 'Rear'}
-              </button>
-            </div>
-            <div className="text-xs opacity-70 mt-2 min-h-4">{scanMsg}</div>
-            <canvas ref={canvasRef} className="hidden" />
           </div>
-        </div>
+
+          <div className="w-full max-w-md">
+            <div className="text-sm font-medium mb-2">Logs</div>
+            <div className="h-48 overflow-auto border rounded p-2 text-xs bg-gray-50">
+              {log.map((line, idx) => (
+                <div key={idx}>{line}</div>
+              ))}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
