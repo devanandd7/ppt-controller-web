@@ -38,12 +38,23 @@ export default function Home() {
     return () => {
       disconnectWS();
       stopMic();
+      stopScan();
     };
   }, []);
 
   function addLog(msg) {
     setLog((l) => [msg, ...l].slice(0, 100));
   }
+
+  // Auto-start QR scan on mobile to help users see the camera preview immediately
+  useEffect(() => {
+    if (typeof navigator !== 'undefined') {
+      const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+      if (isMobile && !connected && !token && !scanning) {
+        startScan();
+      }
+    }
+  }, [connected, token, scanning]);
 
   // QR scanning
   async function startScan() {
@@ -321,11 +332,9 @@ export default function Home() {
           ) : (
             <button className="px-4 py-2 bg-yellow-600 text-white rounded" onClick={stopMic}>Disable Mic</button>
           )}
-          {!connected && (
-            <button className="px-4 py-2 bg-purple-600 text-white rounded" onClick={startScan} disabled={scanning}>
-              {scanning ? "Scanning..." : "Scan QR"}
-            </button>
-          )}
+          <button className="px-4 py-2 bg-purple-600 text-white rounded" onClick={startScan} disabled={scanning}>
+            {scanning ? "Scanning..." : "Scan QR"}
+          </button>
         </div>
       </div>
 
@@ -351,26 +360,30 @@ export default function Home() {
         </div>
       )}
 
-      {/* Manual + Logs only when not connected (to keep UI minimal when connected) */}
-      {!connected && (
-        <>
-          <div className="w-full max-w-md space-y-2">
-            <div className="text-sm font-medium">Manual Test</div>
-            <div className="flex gap-2">
-              <button className="px-3 py-2 border rounded" onClick={() => sendSignal("signal-1")}>Send signal-1 (Next)</button>
-              <button className="px-3 py-2 border rounded" onClick={() => sendSignal("signal-2")}>Send signal-2 (Previous)</button>
+      {/* QR scanning overlay (visible on both desktop/mobile). Shows live camera preview. */}
+      {scanning && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-900 p-3 rounded-lg w-[92vw] max-w-md">
+            <div className="flex justify-between items-center mb-2">
+              <div className="font-medium">Scan QR Code</div>
+              <button className="text-sm px-2 py-1 border rounded" onClick={stopScan}>Close</button>
+            </div>
+            <div className="relative w-full overflow-hidden rounded">
+              <video
+                ref={videoRef}
+                className="w-full block"
+                playsInline
+                muted
+                autoPlay
+              ></video>
+              {/* Scanning frame */}
+              <div className="absolute inset-6 border-2 border-green-500 rounded"></div>
+            </div>
+            <div className="text-xs opacity-70 mt-2">
+              Allow camera access. On mobile, rear camera is requested (environment). Point at the QR code from the desktop app.
             </div>
           </div>
-
-          <div className="w-full max-w-md">
-            <div className="text-sm font-medium mb-2">Logs</div>
-            <div className="h-48 overflow-auto border rounded p-2 text-xs bg-gray-50">
-              {log.map((line, idx) => (
-                <div key={idx}>{line}</div>
-              ))}
-            </div>
-          </div>
-        </>
+        </div>
       )}
     </div>
   );
