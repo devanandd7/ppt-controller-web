@@ -1,115 +1,226 @@
-import Image from "next/image";
-import { Geist, Geist_Mono } from "next/font/google";
+import { useEffect, useRef, useState } from "react";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+// Use same-origin WS endpoint that the Next.js API route hosts
+const WS_HOST = typeof window !== "undefined"
+  ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/api/ws`
+  : "";
 
 export default function Home() {
+  const [token, setToken] = useState("");
+  const [connected, setConnected] = useState(false);
+  const [roleStatus, setRoleStatus] = useState({ desktop: false, web: false });
+  const [micEnabled, setMicEnabled] = useState(false);
+  const [log, setLog] = useState([]);
+  const wsRef = useRef(null);
+  const audioCtxRef = useRef(null);
+  const analyserRef = useRef(null);
+  const micSourceRef = useRef(null);
+  const rafRef = useRef(null);
+  const lastKnockTimeRef = useRef(0);
+  const pendingKnockRef = useRef(false);
+  const knockTimerRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      disconnectWS();
+      stopMic();
+    };
+  }, []);
+
+  function addLog(msg) {
+    setLog((l) => [msg, ...l].slice(0, 100));
+  }
+
+  async function connectWS() {
+    if (!token) {
+      alert("Please enter a token");
+      return;
+    }
+    try {
+      // Ensure the API route initializes its WebSocket server before upgrade
+      await fetch("/api/ws");
+      const url = `${WS_HOST}/?token=${encodeURIComponent(token)}&role=web`;
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+      ws.onopen = () => {
+        setConnected(true);
+        addLog("WebSocket connected");
+      };
+      ws.onclose = () => {
+        setConnected(false);
+        setRoleStatus({ desktop: false, web: false });
+        addLog("WebSocket disconnected");
+      };
+      ws.onerror = (e) => {
+        addLog("WebSocket error");
+      };
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "status") {
+            setRoleStatus({ desktop: !!data.desktop, web: !!data.web });
+          } else if (data.type === "signal") {
+            addLog(`Received ${data.name}`);
+          } else if (data.type === "connected") {
+            addLog(`Server acknowledged connection as ${data.role}`);
+          } else if (data.type === "error") {
+            addLog(`Server error: ${data.message}`);
+          }
+        } catch {}
+      };
+    } catch (e) {
+      addLog("Failed to connect");
+    }
+  }
+
+  function disconnectWS() {
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch {}
+      wsRef.current = null;
+    }
+  }
+
+  function sendSignal(name) {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "signal", name }));
+      addLog(`Sent ${name}`);
+    } else {
+      addLog("Cannot send, not connected");
+    }
+  }
+
+  async function startMic() {
+    if (micEnabled) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      audioCtxRef.current = audioCtx;
+      micSourceRef.current = source;
+      analyserRef.current = analyser;
+      setMicEnabled(true);
+      addLog("Microphone enabled");
+      loopDetect();
+    } catch (e) {
+      addLog("Microphone access denied");
+    }
+  }
+
+  function stopMic() {
+    setMicEnabled(false);
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      try { audioCtxRef.current.close(); } catch {}
+      audioCtxRef.current = null;
+    }
+    if (knockTimerRef.current) {
+      clearTimeout(knockTimerRef.current);
+      knockTimerRef.current = null;
+    }
+  }
+
+  function loopDetect() {
+    const analyser = analyserRef.current;
+    if (!analyser) return;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+
+    const detect = () => {
+      analyser.getByteTimeDomainData(data);
+      // Simple energy/peak detection on time-domain signal
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) {
+        const v = (data[i] - 128) / 128; // normalize -1..1
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / data.length);
+
+      const THRESH = 0.2; // adjust if needed
+      const NOW = performance.now();
+
+      if (rms > THRESH) {
+        if (!pendingKnockRef.current) {
+          pendingKnockRef.current = true; // first knock in a possible series
+          if (knockTimerRef.current) clearTimeout(knockTimerRef.current);
+          knockTimerRef.current = setTimeout(() => {
+            // Single knock timeout reached -> treat as 1 knock
+            pendingKnockRef.current = false;
+            sendSignal("signal-1");
+          }, 250); // short window to avoid counting the same hit twice
+          lastKnockTimeRef.current = NOW;
+        } else {
+          // A second peak detected while pending -> double knock
+          const delta = NOW - lastKnockTimeRef.current;
+          if (delta <= 1000) {
+            if (knockTimerRef.current) {
+              clearTimeout(knockTimerRef.current);
+              knockTimerRef.current = null;
+            }
+            pendingKnockRef.current = false;
+            sendSignal("signal-2");
+          }
+          lastKnockTimeRef.current = NOW;
+        }
+      }
+
+      rafRef.current = requestAnimationFrame(detect);
+    };
+    rafRef.current = requestAnimationFrame(detect);
+  }
+
   return (
-    <div
-      className={`${geistSans.className} ${geistMono.className} font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20`}
-    >
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
+    <div className="min-h-screen p-6 flex flex-col items-center gap-6">
+      <h1 className="text-2xl font-semibold">Web Knock Controller</h1>
+      <div className="w-full max-w-md space-y-3">
+        <label className="block text-sm font-medium">Token</label>
+        <input
+          className="w-full border rounded px-3 py-2"
+          placeholder="Enter token from desktop app"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
         />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/pages/index.js
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+        <div className="flex items-center gap-2">
+          {!connected ? (
+            <button className="px-4 py-2 bg-blue-600 text-white rounded" onClick={connectWS}>Connect</button>
+          ) : (
+            <button className="px-4 py-2 bg-gray-600 text-white rounded" onClick={disconnectWS}>Disconnect</button>
+          )}
+          {!micEnabled ? (
+            <button className="px-4 py-2 bg-green-600 text-white rounded" onClick={startMic}>Enable Mic</button>
+          ) : (
+            <button className="px-4 py-2 bg-yellow-600 text-white rounded" onClick={stopMic}>Disable Mic</button>
+          )}
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      </div>
+
+      <div className="w-full max-w-md space-y-2">
+        <div className="text-sm">Status: {connected ? "Connected" : "Disconnected"}</div>
+        <div className="text-sm">Desktop joined: {roleStatus.desktop ? "Yes" : "No"}</div>
+        <div className="text-sm">Website joined: {roleStatus.web ? "Yes" : "No"}</div>
+      </div>
+
+      <div className="w-full max-w-md space-y-2">
+        <div className="text-sm font-medium">Manual Test</div>
+        <div className="flex gap-2">
+          <button className="px-3 py-2 border rounded" onClick={() => sendSignal("signal-1")}>Send signal-1 (Next)</button>
+          <button className="px-3 py-2 border rounded" onClick={() => sendSignal("signal-2")}>Send signal-2 (Previous)</button>
+        </div>
+      </div>
+
+      <div className="w-full max-w-md">
+        <div className="text-sm font-medium mb-2">Logs</div>
+        <div className="h-48 overflow-auto border rounded p-2 text-xs bg-gray-50">
+          {log.map((line, idx) => (
+            <div key={idx}>{line}</div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
